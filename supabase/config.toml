@@ -1,0 +1,4 @@
+project_id = "fnzzthutclkmpgiyymnx"
+
+[functions.samarth-chat]
+verify_jwt = false
