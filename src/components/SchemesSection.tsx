@@ -14,7 +14,7 @@ const item = {
 };
 
 const SchemesSection = () => {
-  // Use the first 3 schemes from the matching agent database yoooooooo
+  // Use the first 3 schemes from the matching agent database
   const schemes = SCHEMES_DB.slice(0, 3).map(s => ({
     icon: s.categoryHeading.includes("Education") ? Home : (s.categoryHeading.includes("Women") ? Heart : Tractor),
     tag: s.categoryHeading.split(" ")[1],
