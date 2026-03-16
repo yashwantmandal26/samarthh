@@ -1,21 +1,21 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, ArrowLeft, Loader2, Bot, User, Search, Sparkles } from "lucide-react";
+import { Send, ArrowLeft, Bot, User, Search, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useNavigate, useSearchParams } from "react-router-dom";
-import ReactMarkdown from "react-markdown";
-import { Message, streamChat, createConversation, saveMessage } from "@/lib/chat-api";
+import { useNavigate } from "react-router-dom";
 import { useToast } from "@/hooks/use-toast";
-import { UserProfile, matchSchemes, formatSchemesToMarkdown, Scheme } from "@/lib/matchingAgent";
-import { supabase } from "@/integrations/supabase/client";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import SchemeDetailModal from "@/components/SchemeDetailModal";
+import { saveProfile } from "@/lib/offlineDb";
 
-const quickQuestions = [
-  "How to apply for Domicile Certificate?",
-  "Birsa Awas Yojana eligibility?",
-  "How to check land records on Jharbhoomi?",
-  "e-Kalyan scholarship process?",
-];
+// Multi-Agent System Imports
+import { useOrchestrator } from "@/agents/useOrchestrator";
+import { streamChat, createConversation, saveMessage, Message } from "@/agents/ExtractionAgent";
+import { formatSchemesToMarkdown, matchSchemes, explainEligibility } from "@/agents/ReasoningAgent";
+import { UserProfile, Scheme } from "@/lib/types";
+
+
+type AppLanguage = "en" | "hi" | "sa" | "hinglish";
+type ProfileField = keyof UserProfile;
+type ChatMode = "assist" | "identify";
 
 const GREETINGS = {
   en: {
@@ -36,71 +36,152 @@ const GREETINGS = {
   }
 };
 
+const coerceChatMode = (value: string): ChatMode => (value === "assist" ? "assist" : "identify");
+
+const parseIncome = (input: string): number | null => {
+  const text = input.toLowerCase().replace(/,/g, "").trim();
+  const match = text.match(/\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const base = Number(match[0]);
+  if (Number.isNaN(base)) return null;
+  if (text.includes("lakh") || text.includes("lac")) return Math.round(base * 100000);
+  if (text.includes("crore") || text.includes("cr")) return Math.round(base * 10000000);
+  return Math.round(base);
+};
+
+const parseFieldValue = (field: ProfileField | "COMPLETE", input: string): unknown => {
+  const text = input.trim();
+  const lower = text.toLowerCase();
+  if (field === "COMPLETE") return null;
+
+  if (field === "age") {
+    const num = Number((text.match(/\d+/) || [""])[0]);
+    if (!Number.isNaN(num) && num >= 1 && num <= 120) return num;
+    return null;
+  }
+
+  if (field === "income") {
+    return parseIncome(text);
+  }
+
+  if (field === "gender") {
+    if (/(^|\b)(male|m|man|boy)(\b|$)/i.test(lower)) return "Male";
+    if (/(^|\b)(female|f|woman|girl)(\b|$)/i.test(lower)) return "Female";
+    return null;
+  }
+
+  if (field === "category") {
+    if (/(^|\b)sc(\b|$)|scheduled caste/i.test(lower)) return "SC";
+    if (/(^|\b)st(\b|$)|scheduled tribe/i.test(lower)) return "ST";
+    if (/(^|\b)obc(\b|$)/i.test(lower)) return "OBC";
+    if (/(^|\b)general(\b|$)|gen(\b|$)/i.test(lower)) return "General";
+    return null;
+  }
+
+  if (field === "occupation") {
+    if (!text) return null;
+    return text;
+  }
+
+  if (field === "rural_or_urban") {
+    if (/(^|\b)rural(\b|$)|village/i.test(lower)) return "Rural";
+    if (/(^|\b)urban(\b|$)|city|town/i.test(lower)) return "Urban";
+    return null;
+  }
+
+  if (field === "ration_card") {
+    if (/(^|\b)pink(\b|$)/i.test(lower)) return "Pink";
+    if (/(^|\b)yellow(\b|$)/i.test(lower)) return "Yellow";
+    if (/(^|\b)green(\b|$)/i.test(lower)) return "Green";
+    if (/(^|\b)white(\b|$)/i.test(lower)) return "White";
+    if (/(^|\b)none(\b|$)|no ration/i.test(lower)) return "None";
+    return null;
+  }
+
+  if (field === "marital_status") {
+    if (/(^|\b)unmarried|single(\b|$)/i.test(lower)) return "Unmarried";
+    if (/(^|\b)married(\b|$)/i.test(lower)) return "Married";
+    if (/(^|\b)widow(\b|$)/i.test(lower)) return "Widow";
+    if (/(^|\b)divorced(\b|$)/i.test(lower)) return "Divorced";
+    return null;
+  }
+
+  if (field === "owns_land") {
+    if (/(^|\b)(yes|y|haan|ha|true|1)(\b|$)/i.test(lower)) return true;
+    if (/(^|\b)(no|n|nahi|nahin|false|0)(\b|$)/i.test(lower)) return false;
+    return null;
+  }
+
+  return null;
+};
+
+const getNextQuestion = (field: ProfileField | "COMPLETE"): string => {
+  if (field === "COMPLETE") return "";
+  const en: Record<ProfileField, string> = {
+    age: "Please tell me your age.",
+    category: "What is your caste category? (General, SC, ST, OBC)",
+    income: "What is your annual family income in INR?",
+    gender: "What is your gender? (Male/Female)",
+    occupation: "What is your occupation? (e.g., Student, Farmer, Worker)",
+    rural_or_urban: "Do you live in a Rural or Urban area?",
+    special_status: "Do you have any special status we should consider?",
+    ration_card: "What type of ration card do you have? (Pink/Yellow/Green/White/None)",
+    marital_status: "What is your marital status? (Unmarried/Married/Widow/Divorced)",
+    owns_land: "Do you own agricultural land? (Yes/No)",
+  };
+  return en[field] || "Please share this detail.";
+};
+
 const ChatPage = () => {
-  const [language, setLanguage] = useState<"en" | "hi" | "sa" | "hinglish" | null>(null);
+  const [language, setLanguage] = useState<AppLanguage | null>(null);
   const [messages, setMessages] = useState<(Message & { matchedSchemes?: Scheme[] })[]>([]);
   const [input, setInput] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const [chatMode, setChatMode] = useState<"assist" | "identify">("identify");
-  const [conversationId, setConversationId] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
-  const [nextParam, setNextParam] = useState<string | null>(null);
-  const [selectedScheme, setSelectedScheme] = useState<Scheme | null>(null);
-  const [isModalOpen, setIsModalOpen] = useState(false);
+  
+  const { 
+    collectedData, 
+    isLoading, 
+    setIsLoading, 
+    chatMode, 
+    setChatMode, 
+    conversationId, 
+    setConversationId, 
+    getNextMissingField, 
+    handleExtraction, // Added this
+    setUserProfile, 
+    setCollectedData
+  } = useOrchestrator(sessionId);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const latestMessageRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const handleSendRef = useRef<any>(null);
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
   const { toast } = useToast();
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
-
-  const scrollToLatestMessageTop = () => {
-    latestMessageRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-  };
-
-  useEffect(() => {
-    const lastMessage = messages[messages.length - 1];
-    if (lastMessage?.role === "assistant" && isLoading) {
-      // If assistant is responding, scroll to the start of the message
-      scrollToLatestMessageTop();
-    } else {
-      // For user messages or when assistant is done, scroll to bottom
-      scrollToBottom();
-    }
-  }, [messages, isLoading]);
-
-  // Global key listener to auto-focus input
+  // 1. Auto-focus on key press
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't focus if user is already typing in an input or using a modifier key (Ctrl, Alt, etc.)
-      if (
-        document.activeElement?.tagName === "INPUT" ||
-        document.activeElement?.tagName === "TEXTAREA" ||
-        e.ctrlKey ||
-        e.metaKey ||
-        e.altKey ||
-        e.key === "Escape" ||
-        e.key === "Tab" ||
-        e.key === "Enter"
-      ) {
-        return;
-      }
+      // Ignore if user is already typing in an input or textarea
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      
+      // Ignore special keys (Ctrl, Alt, Meta, F-keys, etc.)
+      if (e.key.length > 1 || e.ctrlKey || e.altKey || e.metaKey) return;
 
-      // If it's a printable character, focus the input
-      if (e.key.length === 1) {
-        inputRef.current?.focus();
-      }
+      // Focus the input
+      inputRef.current?.focus();
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, isLoading]);
 
   // Show proactive greeting based on mode and language
   useEffect(() => {
@@ -110,87 +191,9 @@ const ChatPage = () => {
     }
     const initialText = GREETINGS[language][chatMode];
     setMessages([{ role: "assistant", content: initialText }]);
-    // Reset userProfile to have a fresh start on tab switch or language change
     setUserProfile(null);
-  }, [chatMode, language]);
-
-  // Handle extraction from assistant content
-  const extractDataFromContent = useCallback(async (content: string) => {
-    const match = content.match(/PROFILE_START\s*({.*?})\s*PROFILE_END/s);
-    if (match && match[1]) {
-      try {
-        const extracted = JSON.parse(match[1]) as UserProfile;
-        
-        // Normalize income if it's potentially monthly (heuristic: if < 50000, assume monthly)
-        if (extracted.income > 0 && extracted.income < 50000) {
-          extracted.income = extracted.income * 12;
-        }
-
-        // Generate formatted schemes response
-        const { schemes: ranked, next_required_param } = matchSchemes(extracted);
-
-        // Check if we have all mandatory fields
-        const mandatoryFields: (keyof UserProfile)[] = ['age', 'category', 'income', 'gender', 'occupation', 'rural_or_urban'];
-        const missingMandatory = mandatoryFields.find(f => extracted[f] === undefined || extracted[f] === null || extracted[f] === "");
-
-        if (missingMandatory) {
-          return null; // Still in Phase 1
-        }
-
-        // Check if we need Phase 2 fields
-        const needsRationCard = extracted.income <= 250000;
-        const needsMaritalStatus = (extracted.gender?.toLowerCase() === 'female' || extracted.gender?.toLowerCase() === 'f') && extracted.age >= 18;
-        const needsLand = ['farmer', 'agriculture', 'kisan'].some(occ => extracted.occupation?.toLowerCase().includes(occ));
-
-        if (needsRationCard && !extracted.ration_card) return null;
-        if (needsMaritalStatus && !extracted.marital_status) return null;
-        if (needsLand && extracted.owns_land === undefined) return null;
-
-        // If we reach here, we are done
-        setNextParam(null);
-        setUserProfile(extracted);
-        console.log("Extracted Profile:", extracted);
-
-        const markdownResponse = formatSchemesToMarkdown(ranked, extracted.age, extracted.category, language || "en");
-
-        // Inject the formatted message into the chat UI
-        setMessages((prev) => {
-          const last = prev[prev.length - 1];
-          if (last?.role === "assistant") {
-            return prev.map((m, i) =>
-              i === prev.length - 1 
-                ? { 
-                    ...m, 
-                    content: m.content.replace(/PROFILE_START\s*{.*?}\s*PROFILE_END/s, markdownResponse),
-                    matchedSchemes: ranked.map(r => r.scheme) 
-                  } 
-                : m
-            );
-          }
-          return prev;
-        });
-
-        // Optional: Upsert to Supabase
-        if (sessionId) {
-          await supabase
-            .from("user_profiles")
-            .upsert({ session_id: sessionId, ...extracted }, { onConflict: "session_id" });
-        }
-      } catch (e) {
-        console.error("Extraction parse error:", e);
-      }
-    }
-    return null;
-  }, [sessionId, language]);
-
-  // Handle initial query from URL
-  useEffect(() => {
-    const q = searchParams.get("q");
-    if (q && language) {
-      handleSend(q);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [language]);
+    setCollectedData({});
+  }, [chatMode, language, setUserProfile, setCollectedData]);
 
   const handleSend = useCallback(async (text?: string, isHidden: boolean = false) => {
     const messageText = text || input.trim();
@@ -198,28 +201,87 @@ const ChatPage = () => {
 
     if (!isHidden) {
       setInput("");
-      const userMsg: Message = { role: "user", content: messageText };
-      setMessages((prev) => [...prev, userMsg]);
+      setMessages((prev) => [...prev, { role: "user", content: messageText }]);
     }
     setIsLoading(true);
 
-    // Create conversation and session if needed
     let convId = conversationId;
     let sessId = sessionId;
     if (!convId) {
-      try {
-        sessId = crypto.randomUUID();
-        setSessionId(sessId);
-        convId = await createConversation(sessId);
-        setConversationId(convId);
-      } catch (e) {
-        console.error("Failed to create conversation:", e);
-      }
+      sessId = window.crypto?.randomUUID?.() || Math.random().toString(36).substring(2);
+      setSessionId(sessId);
+      convId = createConversation(sessId);
+      setConversationId(convId);
     }
 
-    // Save user message (only if not hidden)
     if (convId && !isHidden) {
-      saveMessage(convId, "user", messageText).catch(console.error);
+      saveMessage(convId, "user", messageText);
+    }
+
+    // AI-Driven Profile Collection (Replaces Regex)
+    if (chatMode === "identify" && !isHidden) {
+      
+      let assistantContent = "";
+      const upsertAssistant = (chunk: string) => {
+        assistantContent += chunk;
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last?.role === "assistant") {
+            return prev.map((m, i) =>
+              i === prev.length - 1 ? { ...m, content: assistantContent } : m
+            );
+          }
+          return [...prev, { role: "assistant", content: assistantContent }];
+        });
+      };
+
+      const nextField = getNextMissingField(collectedData);
+
+      await streamChat({
+        messages: [...messages, { role: "user", content: messageText }],
+        chatMode,
+        language: language || "en",
+        nextParam: nextField,
+        onDelta: upsertAssistant,
+        onDone: async (fullContent) => {
+          setIsLoading(false);
+          if (convId && assistantContent) {
+            saveMessage(convId, "assistant", assistantContent);
+          }
+
+          // SUPERVISOR LOOP: Process the AI's response to extract data
+          const nextStep = await handleExtraction(fullContent, setMessages, (ranked, profile) => {
+            const response = formatSchemesToMarkdown(
+              ranked,
+              profile,
+              language || "en",
+            );
+
+            setMessages((prev) => [...prev, { role: "assistant", content: response, matchedSchemes: ranked.map((r) => r.scheme) }]);
+            if (convId) saveMessage(convId, "assistant", response);
+          });
+
+          // If nextStep is COMPLETE, handleExtraction already called the callback above.
+          // If not COMPLETE, we check if the AI actually asked a question.
+          if (nextStep !== "COMPLETE") {
+            const hasQuestion = assistantContent.includes("?") || assistantContent.length > 50;
+            // Also check if the AI is clearly trying to end (e.g., "Let's summarize", "That completes")
+            const isEnding = /finalize|complete|summarize|gathered|total/i.test(assistantContent);
+            
+            if (!hasQuestion || isEnding) {
+              const fallbackQuestion = `Got it. ${getNextQuestion(nextStep as ProfileField)}`;
+              setMessages((prev) => [...prev, { role: "assistant", content: fallbackQuestion }]);
+              if (convId) saveMessage(convId, "assistant", fallbackQuestion);
+            }
+          }
+        },
+        onError: (error) => {
+          setIsLoading(false);
+          toast({ title: "Error", description: error, variant: "destructive" });
+        },
+      });
+
+      return;
     }
 
     let assistantContent = "";
@@ -236,42 +298,28 @@ const ChatPage = () => {
       });
     };
 
+    const nextField = getNextMissingField(collectedData);
+
     await streamChat({
-      messages: isHidden 
-        ? [...messages, { role: "system", content: messageText }] 
-        : [...messages, { role: "user", content: messageText }],
+      messages: [...messages, { role: "user", content: messageText }],
       chatMode,
       language: language || "en",
-      nextParam: nextParam,
+      nextParam: nextField,
       onDelta: upsertAssistant,
       onDone: async () => {
         setIsLoading(false);
         if (convId && assistantContent) {
-          saveMessage(convId, "assistant", assistantContent).catch(console.error);
-          const result = await extractDataFromContent(assistantContent);
-          if (result?.next_required_param) {
-            // Call handleSend again via ref to avoid circular dependency
-            setTimeout(() => {
-              handleSendRef.current?.(`Matched ${result.matchedCount} schemes. Need to collect '${result.next_required_param}' to narrow down.`, true);
-            }, 500);
-          }
+          saveMessage(convId, "assistant", assistantContent);
+          
+          // Assist mode keeps raw assistant response; identify mode is handled deterministically above.
         }
       },
       onError: (error) => {
         setIsLoading(false);
-        toast({
-          title: "Error",
-          description: error,
-          variant: "destructive",
-        });
+        toast({ title: "Error", description: error, variant: "destructive" });
       },
     });
-
-    // Re-focus input after sending
-    setTimeout(() => {
-      inputRef.current?.focus();
-    }, 100);
-  }, [input, isLoading, conversationId, sessionId, messages, chatMode, toast, extractDataFromContent, language, nextParam]);
+  }, [input, isLoading, conversationId, sessionId, messages, chatMode, toast, language, getNextMissingField, collectedData, setConversationId, setIsLoading, setCollectedData, setUserProfile]);
 
   useEffect(() => {
     handleSendRef.current = handleSend;
@@ -279,7 +327,6 @@ const ChatPage = () => {
 
   return (
     <div className="flex h-screen flex-col bg-background">
-      {/* Header */}
       <header className="flex items-center gap-3 border-b border-border bg-card px-4 py-3">
         <button onClick={() => navigate("/")} className="text-muted-foreground hover:text-foreground">
           <ArrowLeft className="h-5 w-5" />
@@ -291,10 +338,9 @@ const ChatPage = () => {
         </div>
       </header>
 
-      {/* Mode Toggle */}
       <div className="bg-muted/30 border-b border-border px-4 py-2">
         <div className="mx-auto max-w-2xl">
-          <Tabs value={chatMode} onValueChange={(v) => setChatMode(v as any)} className="w-full">
+          <Tabs value={chatMode} onValueChange={(value) => setChatMode(coerceChatMode(value))} className="w-full">
             <TabsList className="grid w-full grid-cols-2 bg-background/50">
               <TabsTrigger value="identify" className="flex items-center gap-2">
                 <Sparkles className="h-3.5 w-3.5" />
@@ -309,137 +355,34 @@ const ChatPage = () => {
         </div>
       </div>
 
-      {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-6">
         <div className="mx-auto max-w-2xl space-y-6">
           {!language && (
             <div className="mt-2 flex flex-wrap justify-center gap-3">
-              <Button 
-                variant="outline" 
-                onClick={() => setLanguage("en")}
-                className="rounded-xl px-6 py-4 h-auto flex flex-col items-center gap-1 border-primary/20 hover:border-primary hover:bg-primary/5"
-              >
-                <span className="font-bold">English</span>
-                <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Default</span>
-              </Button>
-              <Button 
-                variant="outline" 
-                onClick={() => setLanguage("hi")}
-                className="rounded-xl px-6 py-4 h-auto flex flex-col items-center gap-1 border-primary/20 hover:border-primary hover:bg-primary/5"
-              >
-                <span className="font-bold text-lg">हिन्दी</span>
-                <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Hindi</span>
-              </Button>
-              <Button 
-                variant="outline" 
-                onClick={() => setLanguage("sa")}
-                className="rounded-xl px-6 py-4 h-auto flex flex-col items-center gap-1 border-primary/20 hover:border-primary hover:bg-primary/5"
-              >
-                <span className="font-bold text-lg">संताली</span>
-                <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Santhali</span>
-              </Button>
-              <Button 
-                variant="outline" 
-                onClick={() => setLanguage("hinglish")}
-                className="rounded-xl px-6 py-4 h-auto flex flex-col items-center gap-1 border-primary/20 hover:border-primary hover:bg-primary/5"
-              >
-                <span className="font-bold text-lg">Hinglish</span>
-                <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Mixed</span>
-              </Button>
-            </div>
-          )}
-
-          {chatMode === "assist" && language && messages.length === 1 && (
-            <div className="mt-2 flex flex-wrap justify-center gap-2">
-              {quickQuestions.map((q) => (
-                <button
-                  key={q}
-                  onClick={() => handleSend(q)}
-                  className="rounded-full border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground transition hover:bg-muted"
+              {["en", "hi", "sa", "hinglish"].map((lang) => (
+                <Button 
+                  key={lang}
+                  variant="outline" 
+                  onClick={() => setLanguage(lang as AppLanguage)}
+                  className="rounded-xl px-6 py-4 h-auto flex flex-col items-center gap-1 border-primary/20 hover:border-primary hover:bg-primary/5"
                 >
-                  {q}
-                </button>
+                  <span className="font-bold">{lang === "sa" ? "Johar" : lang.toUpperCase()}</span>
+                </Button>
               ))}
             </div>
           )}
 
           {messages.map((msg, i) => (
-            <div
-              key={i}
-              ref={i === messages.length - 1 ? latestMessageRef : null}
-              className={`flex gap-3 ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-            >
+            <div key={i} className={`flex gap-3 ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
               {msg.role === "assistant" && (
-                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-white border border-border overflow-hidden">
-                  <img src="/logo.png" alt="AI" className="h-6 w-6 object-contain" />
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary">
+                  <Bot className="h-4 w-4 text-primary-foreground" />
                 </div>
               )}
-              <div className="flex flex-col gap-2 max-w-[80%]">
-                <div
-                  className={`rounded-xl px-4 py-3 text-sm whitespace-pre-wrap ${
-                    msg.role === "user"
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-muted text-foreground shadow-sm"
-                  }`}
-                >
-                  {msg.role === "assistant" ? (
-                    <div className="prose prose-sm max-w-none dark:prose-invert prose-headings:mb-2 prose-p:mb-1 prose-table:my-4 prose-table:border prose-table:border-border prose-th:bg-muted/50 prose-th:px-3 prose-th:py-2 prose-td:px-3 prose-td:py-2">
-                      <ReactMarkdown
-                        components={{
-                          strong: ({node, ...props}) => {
-                            // If the strong text matches a scheme name in msg.matchedSchemes, make it a button
-                            const text = props.children?.toString() || "";
-                            const foundScheme = msg.matchedSchemes?.find(s => 
-                              s.name === text || 
-                              s.hindiName === text || 
-                              s.name.includes(text) || 
-                              (s.hindiName && s.hindiName.includes(text))
-                            );
-                            if (foundScheme) {
-                              return (
-                                <button 
-                                  onClick={() => {
-                                    setSelectedScheme(foundScheme);
-                                    setIsModalOpen(true);
-                                  }}
-                                  className="text-primary font-bold hover:underline decoration-2 underline-offset-2 transition-all text-left"
-                                >
-                                  {text}
-                                </button>
-                              );
-                            }
-                            return <strong {...props} />;
-                          }
-                        }}
-                      >
-                        {msg.content}
-                      </ReactMarkdown>
-                    </div>
-                  ) : (
-                    msg.content
-                  )}
-                </div>
-
-                {/* Detailed Guide Buttons */}
-                {msg.matchedSchemes && msg.matchedSchemes.length > 0 && (
-                  <div className="flex flex-wrap gap-2 mt-1">
-                    {msg.matchedSchemes.map((scheme) => (
-                      <Button 
-                        key={scheme.id}
-                        variant="outline" 
-                        size="sm"
-                        className="text-[10px] h-8 border-primary/30 bg-primary/5 hover:bg-primary/10 gap-1.5"
-                        onClick={() => {
-                          setSelectedScheme(scheme);
-                          setIsModalOpen(true);
-                        }}
-                      >
-                        <Sparkles className="h-3 w-3 text-primary" />
-                        View Detailed Guide: {scheme.name}
-                      </Button>
-                    ))}
-                  </div>
-                )}
+              <div className={`rounded-xl px-4 py-3 text-sm whitespace-pre-wrap max-w-[80%] ${
+                msg.role === "user" ? "bg-primary text-primary-foreground" : "bg-muted text-foreground shadow-sm"
+              }`}>
+                {msg.content.split("PROFILE_START")[0].trim() || "Thinking..."}
               </div>
               {msg.role === "user" && (
                 <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted">
@@ -448,56 +391,26 @@ const ChatPage = () => {
               )}
             </div>
           ))}
-
-          {isLoading && messages[messages.length - 1]?.role !== "assistant" && (
-            <div className="flex gap-3">
-              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary">
-                <Bot className="h-4 w-4 text-primary-foreground" />
-              </div>
-              <div className="flex items-center gap-2 rounded-xl bg-muted px-4 py-3 text-sm text-muted-foreground">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Thinking...
-              </div>
-            </div>
-          )}
-
-          {/* Matching Agent Widget Removed to Bottom */}
-
           <div ref={messagesEndRef} />
         </div>
       </div>
 
-      {/* Input */}
       <div className="border-t border-border bg-card p-4">
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            handleSend();
-          }}
-          className="mx-auto flex max-w-2xl items-center gap-2"
-        >
+        <form onSubmit={(e) => { e.preventDefault(); handleSend(); }} className="mx-auto flex max-w-2xl items-center gap-2">
           <input
             ref={inputRef}
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={chatMode === "identify" ? "Tell me about yourself..." : "Ask about Jharkhand services..."}
-            className="flex-1 rounded-lg border border-input bg-background px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            placeholder="Type a message..."
+            className="flex-1 rounded-lg border border-input bg-background px-4 py-2.5 text-sm"
             disabled={isLoading}
           />
-          <Button type="submit" size="icon" disabled={isLoading || !input.trim()}>
+          <Button type="submit" disabled={isLoading || !input.trim()}>
             <Send className="h-4 w-4" />
           </Button>
         </form>
       </div>
-
-      {/* Deep Detail Modal */}
-      <SchemeDetailModal 
-        scheme={selectedScheme}
-        isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
-        language={language}
-      />
     </div>
   );
 };

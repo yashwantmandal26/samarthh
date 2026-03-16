@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { ExternalLink, Volume2, VolumeX, Info, CheckCircle2 } from "lucide-react";
-import { Scheme } from "@/lib/matchingAgent";
+import { Scheme } from "@/agents/ReasoningAgent";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 interface SchemeDetailModalProps {

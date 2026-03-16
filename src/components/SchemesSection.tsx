@@ -1,7 +1,7 @@
 import { Home, Heart, Tractor, ArrowRight, Sparkles } from "lucide-react";
 import { motion } from "framer-motion";
 import { Badge } from "@/components/ui/badge";
-import { LOCAL_SCHEMES_DB } from "@/lib/matchingAgent";
+import { SCHEMES_DB } from "@/lib/schemes";
 
 const container = {
   hidden: {},
@@ -15,7 +15,7 @@ const item = {
 
 const SchemesSection = () => {
   // Use the first 3 schemes from the matching agent database
-  const schemes = LOCAL_SCHEMES_DB.slice(0, 3).map(s => ({
+  const schemes = SCHEMES_DB.slice(0, 3).map(s => ({
     icon: s.categoryHeading.includes("Education") ? Home : (s.categoryHeading.includes("Women") ? Heart : Tractor),
     tag: s.categoryHeading.split(" ")[1],
     tagColor: s.categoryHeading.includes("Education") ? "bg-orange-100 text-badge-orange" : (s.categoryHeading.includes("Women") ? "bg-pink-100 text-badge-pink" : "bg-green-100 text-primary"),

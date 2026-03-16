@@ -3,7 +3,7 @@ import React, { useMemo } from "react";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { CheckCircle2, Sparkles } from "lucide-react";
-import { matchSchemes, UserProfile } from "@/lib/matchingAgent";
+import { matchSchemes, UserProfile } from "@/agents/ReasoningAgent";
 
 interface EligibleSchemesCardProps {
   userProfile: UserProfile | null;
@@ -14,9 +14,8 @@ const EligibleSchemesCard: React.FC<EligibleSchemesCardProps> = ({
   userProfile, 
   isLoading 
 }) => {
-  const { schemes: rankedSchemes, next_required_param } = useMemo(() => {
-    if (!userProfile) return { schemes: [], next_required_param: null };
-    // We no longer need allSchemes from props as it's hardcoded in matchingAgent.ts
+  const { schemes: rankedSchemes } = useMemo(() => {
+    if (!userProfile) return { schemes: [] };
     return matchSchemes(userProfile);
   }, [userProfile]);
 

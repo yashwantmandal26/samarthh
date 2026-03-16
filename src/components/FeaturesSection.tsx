@@ -1,34 +1,66 @@
-import { Mic, FileText, IndianRupee } from "lucide-react";
+import { MessageCircleQuestion, Target, Mic, FileText, IndianRupee, Globe } from "lucide-react";
 import { motion } from "framer-motion";
 
 const features = [
   {
+    icon: MessageCircleQuestion,
+    title: "Conversational Discovery",
+    description: "No long forms. Samarth asks you simple questions one-by-one and builds your profile to find matching schemes.",
+  },
+  {
+    icon: Target,
+    title: "Personalised Matching",
+    description: "AI matches your age, income, caste, occupation, and location against 50+ state and central schemes.",
+  },
+  {
     icon: Mic,
-    title: "Voice First",
-    description: "Can't type? Just speak. We support Hindi, English, Santhali, and other Jharkhand languages.",
+    title: "Multilingual Support",
+    description: "Chat in Hindi, English, Santhali, or any language you're comfortable with. Samarth understands them all.",
   },
   {
     icon: FileText,
-    title: "Simple Summaries",
-    description: "No complex legal jargon. Get answers in simple bullet points anyone can understand.",
+    title: "Documents & Steps",
+    description: "Get the exact documents needed and step-by-step apply process with official portal links.",
   },
   {
     icon: IndianRupee,
-    title: "100% Free to Use",
+    title: "100% Free",
     description: "Samarth is completely free for all citizens of Jharkhand. No hidden costs, no subscriptions.",
+  },
+  {
+    icon: Globe,
+    title: "State + Central Schemes",
+    description: "Covers both Jharkhand state schemes and all central government schemes available to Jharkhand citizens.",
   },
 ];
 
 const FeaturesSection = () => {
   return (
-    <section id="about" className="py-16 md:py-24">
+    <section id="about" className="py-20 md:py-28 bg-white">
       <div className="container mx-auto px-4">
-        <h2 className="text-center text-2xl font-bold text-foreground md:text-3xl">
-          Built for Every Jharkhand Citizen
-        </h2>
+        <div className="text-center mb-16">
+          <motion.h2 
+            className="text-3xl md:text-4xl font-extrabold text-[#1a1a1a] mb-4"
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ duration: 0.5 }}
+          >
+            Why Citizens Love Samarth
+          </motion.h2>
+          <motion.p 
+            className="text-muted-foreground/80 font-medium"
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ duration: 0.5, delay: 0.1 }}
+          >
+            Built to make government schemes accessible to every Jharkhand citizen
+          </motion.p>
+        </div>
 
         <motion.div
-          className="mt-12 grid gap-8 md:grid-cols-3"
+          className="grid gap-x-12 gap-y-16 md:grid-cols-3"
           initial="hidden"
           whileInView="show"
           viewport={{ once: true }}
@@ -41,13 +73,13 @@ const FeaturesSection = () => {
                 hidden: { opacity: 0, y: 20 },
                 show: { opacity: 1, y: 0, transition: { duration: 0.4 } },
               }}
-              className="flex flex-col items-center text-center"
+              className="flex flex-col items-center text-center group"
             >
-              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-accent">
-                <f.icon className="h-6 w-6 text-accent-foreground" />
+              <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-[#f0f9f4] transition-transform duration-300 group-hover:scale-110">
+                <f.icon className="h-7 w-7 text-[#166534]" strokeWidth={1.5} />
               </div>
-              <h3 className="mt-4 text-lg font-bold text-foreground">{f.title}</h3>
-              <p className="mt-2 max-w-xs text-sm leading-relaxed text-muted-foreground">
+              <h3 className="mt-6 text-xl font-bold text-[#1a1a1a] tracking-tight">{f.title}</h3>
+              <p className="mt-3 max-w-[280px] text-[15px] leading-relaxed text-muted-foreground/70 font-medium">
                 {f.description}
               </p>
             </motion.div>
